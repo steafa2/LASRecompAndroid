@@ -1,0 +1,110 @@
+# .github/workflows/build-apk.yml
+# Compile l'APK du fork sur GitHub (onglet Actions > "Build APK" > Run workflow).
+# L'APK sort dans les Releases du depot. Il s'installe A COTE de l'appli officielle
+# (identifiant com.lasrecomp.android.fork), sans toucher a ses sauvegardes.
+name: Build APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: 30.0.16248370
+  CMAKE_VERSION: 3.30.4
+  # Cle de signature du fork (usage personnel). Elle est publique dans ce depot :
+  # elle sert seulement a ce que chaque build puisse se mettre a jour par-dessus le precedent.
+  FORK_KEYSTORE_B64: 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
+  FORK_KEYSTORE_PASS: lasfork2026
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Android SDK (NDK, CMake, plateforme)
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" "platforms;android-36"
+          # les scripts du projet lisent ces variables ; celles du runner pointent vers un autre NDK
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_LINUX=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmake/$CMAKE_VERSION/bin" >> "$GITHUB_PATH"
+
+      - name: Cache des dependances compilees
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/deps/out
+            android/deps/src
+          key: deps-${{ env.NDK_VERSION }}-${{ hashFiles('android/deps/*.sh') }}
+
+      - name: Dependances de l'appli (SDL3, shaderc, Vulkan)
+        run: bash android/deps/build_deps.sh
+
+      - name: FFmpeg (videos du jeu)
+        run: |
+          if [ ! -f android/deps/out/lib/libavcodec.so ]; then bash android/deps/build_ffmpeg.sh; fi
+
+      - name: Constructeur du code du jeu (Python, capstone, unicorn, lz4, zig)
+        run: bash android/deps/build_gen_deps.sh
+
+      - name: Identite du fork (installation a cote de l'appli officielle)
+        run: |
+          G=android/lasrecomp/app/build.gradle.kts
+          sed -i -E 's/applicationId = "com\.lasrecomp\.android"/applicationId = "com.lasrecomp.android.fork"/' "$G"
+          sed -i -E "s/versionCode = [0-9]+/versionCode = $((100000 + GITHUB_RUN_NUMBER))/" "$G"
+          sed -i -E "s/versionName = \"([^\"]+)\"/versionName = \"\1-fork.${GITHUB_RUN_NUMBER}\"/" "$G"
+          sed -i 's/android:targetPackage="com\.lasrecomp\.android"/android:targetPackage="com.lasrecomp.android.fork"/' \
+              android/lasrecomp/app/src/main/res/xml/shortcuts.xml
+          sed -i 's/android:label="LAS Recomp"/android:label="LAS Recomp Fork"/' \
+              android/lasrecomp/app/src/main/AndroidManifest.xml
+          grep -n "applicationId\|versionCode\|versionName" "$G"
+
+      - name: Cle de signature
+        run: |
+          mkdir -p "$HOME/.lasrecomp"
+          echo "$FORK_KEYSTORE_B64" | base64 -d > "$HOME/.lasrecomp/fork.p12"
+          {
+            echo "storeFile=$HOME/.lasrecomp/fork.p12"
+            echo "storePassword=$FORK_KEYSTORE_PASS"
+            echo "keyAlias=lasfork"
+            echo "keyPassword=$FORK_KEYSTORE_PASS"
+          } > "$HOME/.lasrecomp/keystore.properties"
+
+      - name: Compilation de l'APK
+        working-directory: android/lasrecomp
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Renommer l'APK
+        run: |
+          cp android/lasrecomp/app/build/outputs/apk/release/app-release.apk "LASRecomp-fork-${GITHUB_RUN_NUMBER}.apk"
+          ls -la *.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LASRecomp-fork-${{ github.run_number }}
+          path: LASRecomp-fork-*.apk
+
+      - name: Publier dans les Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "fork-${GITHUB_RUN_NUMBER}" "LASRecomp-fork-${GITHUB_RUN_NUMBER}.apk" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Fork build ${GITHUB_RUN_NUMBER}" \
+            --notes "Build automatique du fork (commit ${GITHUB_SHA::7}). S'installe a cote de l'appli officielle."
