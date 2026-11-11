@@ -32,7 +32,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Modifications du fork (build de diagnostic)
+      - name: Modifications du fork (resolution adaptative, filtre doux)
         if: ${{ inputs.modifications }}
         run: |
           python3 - <<'PYEOF'
@@ -49,64 +49,136 @@ jobs:
                   sys.exit("FORK: repere introuvable ou ambigu (%d fois au lieu de %d) dans %s :\n  %r" % (n, count, path, anchor))
               if where == "after":
                   out = src.replace(anchor, anchor + new)
-              else:
+              elif where == "before":
                   out = src.replace(anchor, new + anchor)
+              else:
+                  out = src.replace(anchor, new)
               open(path, "w", encoding="utf-8").write(out)
               print("FORK: %s modifie" % path)
 
-          # Build de diagnostic : deux reglages (onglet Video du menu en jeu), lus au demarrage de l'appli.
-          #   fork_tu   : une option de debogage du pilote Turnip (TU_DEBUG), ajoutee a celle du reglage LRZ
-          #   fork_sync : rendu sans le fil de rendu separe (LARECOMP_VK_ASYNC=0)
+          # Deux reglages (onglet Video du menu en jeu), tous deux desactives par defaut :
+          #   fork_dyn  : resolution adaptative - la resolution interne choisie (1.25x et plus) devient un plafond
+          #   fork_soft : filtre doux (B-spline cubique) a la place de l'Upscaler
 
           # ---------------------------------------------------------------- 1. les reglages
           edit("runtime/settings.h",
                "    bool shader_int32;",
-               "    int fork_tu;          // (fork) a Turnip debug option at the next start: vulkan/device.c fork_tu_names\n"
-               "    bool fork_sync;       // (fork) no render thread at the next start (LARECOMP_VK_ASYNC=0)\n",
+               "    bool fork_dyn;        // (fork) a fixed internal resolution above 1x as a ceiling: nvn/output_scale.c\n"
+               "    bool fork_soft;       // (fork) the picture scaled to the window by a smooth cubic filter: vulkan/exec.c post_process\n",
                "before")
           edit("runtime/settings.c",
                '        else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;\n',
-               '        else if (!strcmp(key, "fork_tu")) g_settings.fork_tu = atoi(val);\n'
-               '        else if (!strcmp(key, "fork_sync")) g_settings.fork_sync = atoi(val) != 0;\n')
+               '        else if (!strcmp(key, "fork_dyn")) g_settings.fork_dyn = atoi(val) != 0;\n'
+               '        else if (!strcmp(key, "fork_soft")) g_settings.fork_soft = atoi(val) != 0;\n')
           edit("runtime/settings.c",
                '    fprintf(f, "shader_int32 = %d\\n", g_settings.shader_int32);\n',
-               '    fprintf(f, "fork_tu = %d\\nfork_sync = %d\\n", g_settings.fork_tu, g_settings.fork_sync);\n')
+               '    fprintf(f, "fork_dyn = %d\\nfork_soft = %d\\n", g_settings.fork_dyn, g_settings.fork_soft);\n')
 
           # ---------------------------------------------------------------- 2. le menu (onglet Video)
           edit("runtime/ui/menu.mm",
                '    opt_toggle("Frame generation", &g_settings.frame_gen, false,',
-               '''    {   // (fork) diagnostics, read when the app starts: vulkan/device.c
-                  static const char *tu[] = {"Off", "sysmem", "gmem", "noubwc", "flushall", "nobin"};
-                  if (g_settings.fork_tu < 0 || g_settings.fork_tu > 5) g_settings.fork_tu = 0;
-                  opt_choice("Turnip debug (fork)", &g_settings.fork_tu, tu, 6, 0,
-                             "Diagnostic. Starts the Turnip driver with one of its debug options: sysmem / gmem force one of its "
-                             "two ways of drawing a pass, noubwc turns image compression off, flushall and nobin are slower, "
-                             "simpler paths. If shadows stop flickering with one of them, the driver is the cause. Takes effect "
-                             "at the next start of the app.");
-                  opt_toggle("Synchronous rendering (fork)", &g_settings.fork_sync, false,
-                             "Diagnostic. Translates the game's drawing on the game's own thread instead of a render thread one "
-                             "frame behind. Slower. If shadows stop flickering, the cause is timing between the two threads. "
-                             "Takes effect at the next start of the app.");
+               '''    // (fork)
+              opt_toggle("Adaptive resolution (fork)", &g_settings.fork_dyn, false,
+                         "With Internal resolution at 1.25x or more, that resolution becomes a ceiling: the game renders at it "
+                         "while the GPU keeps up, and lower (down to 65% of it) while it doesn't. With frame generation on it "
+                         "steps down early enough for the generated frames to keep coming. Each change is a short hitch.");
+              opt_toggle("Soft filter (fork)", &g_settings.fork_soft, false,
+                         "Scales the game image to the screen with a smooth cubic filter, in place of the Upscaler. A softer "
+                         "picture, with less shimmer on fine detail such as tall grass while the camera moves.");
+          ''',
+               "before")
+
+          # ---------------------------------------------------------------- 3. resolution adaptative (nvn/output_scale.c)
+          edit("runtime/nvn/output_scale.c",
+               "    double prev = g_dyn;\n",
+               '''    double fk_hi = 14.5, fk_lo = 10.5, fk_floor = 0.5;  // (fork: the limits used below, as they were)
+          #ifdef __ANDROID__
+              if (g_settings.fork_dyn) {  // (fork) Adaptive resolution: a higher floor, and with frame generation the generated
+                  fk_floor = 0.65;        // frames' share of the GPU kept free (20 ms of a 33.3 ms frame, back up under 15 ms)
+                  if (g_settings.frame_gen) { fk_hi = 10.0; fk_lo = 7.5; }
+              }
+          #endif
+          ''')
+          edit("runtime/nvn/output_scale.c",
+               "avg_gpu > 14.5 * budget : avg_dt > 17.4 * budget;",
+               "avg_gpu > fk_hi * budget : avg_dt > 17.4 * budget;", "replace")
+          edit("runtime/nvn/output_scale.c",
+               "g_dyn = fmax(0.5, g_dyn - step);",
+               "g_dyn = fmax(fk_floor, g_dyn - step);", "replace")
+          edit("runtime/nvn/output_scale.c",
+               "avg_gpu < 10.5 * budget && g_dyn_good >= 4",
+               "avg_gpu < fk_lo * budget && g_dyn_good >= 4", "replace")
+          edit("runtime/nvn/output_scale.c",
+               "    h = fmax(h, 0.1);  // (.25x of a small window)\n",
+               '''#ifdef __ANDROID__
+              // (fork) Adaptive resolution: 1.25x / 1.5x / 2x .. as a ceiling, lowered while the GPU is at its limit
+              if (g_settings.fork_dyn && forced <= 0 && h > 1.0 &&
+                  ((mode >= 2 && mode <= 8) || mode == RES_X125 || mode == RES_X150)) {
+                  dyn_update(now, gpu_ms);
+                  h *= g_dyn;
+              }
+          #endif
+          ''',
+               "before")
+
+          # ---------------------------------------------------------------- 4. filtre doux (vulkan/shaders.c + exec.c)
+          edit("runtime/nvn/vulkan/shaders.c",
+               '    if (!strcmp(name, "post.vert")) {\n',
+               r'''    // (fork) Soft filter: the picture resampled by a cubic B-spline (no negative lobes: smooth, no ringing), its 16
+              // texels read as 4 bilinear taps. a = (1 / input size, input size), b.xy = output size.
+              if (!strcmp(name, "fork_soft.frag")) {
+                  *stage = STAGE_FRAGMENT;
+                  return "#version 450\n"
+                         "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+                         "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+                         "layout(location = 0) out vec4 o;\n"
+                         "void main() {\n"
+                         "  vec2 st = gl_FragCoord.xy / pc.b.xy * pc.a.zw - 0.5;\n"
+                         "  vec2 i = floor(st), f = st - i;\n"
+                         "  vec2 f2 = f * f, f3 = f2 * f;\n"
+                         "  vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0;\n"
+                         "  vec2 w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;\n"
+                         "  vec2 w3 = f3 / 6.0;\n"
+                         "  vec2 w2 = 1.0 - w0 - w1 - w3;\n"
+                         "  vec2 g0 = w0 + w1, g1 = w2 + w3;\n"
+                         "  vec2 h0 = (i - 0.5 + w1 / g0) * pc.a.xy;\n"
+                         "  vec2 h1 = (i + 1.5 + w3 / g1) * pc.a.xy;\n"
+                         "  vec3 c = g0.y * (g0.x * textureLod(t, vec2(h0.x, h0.y), 0.0).rgb + g1.x * textureLod(t, vec2(h1.x, h0.y), 0.0).rgb) +\n"
+                         "           g1.y * (g0.x * textureLod(t, vec2(h0.x, h1.y), 0.0).rgb + g1.x * textureLod(t, vec2(h1.x, h1.y), 0.0).rgb);\n"
+                         "  o = vec4(c, 1.0);\n"
+                         "}\n";
               }
           ''',
                "before")
 
-          # ---------------------------------------------------------------- 3. au demarrage, avant le chargement du pilote
-          edit("runtime/nvn/vulkan/device.c",
-               '        if (!lrz && !getenv("TU_DEBUG")) setenv("TU_DEBUG", "nolrz", 1);\n',
-               '''        {   // (fork) diagnostics from the Video tab
-                      static const char *const fork_tu_names[] = {"", "sysmem", "gmem", "noubwc", "flushall", "nobin"};
-                      int k = g_settings.fork_tu;
-                      if (k > 0 && k < 6) {
-                          char v[96];
-                          const char *cur = getenv("TU_DEBUG");
-                          snprintf(v, sizeof v, "%s%s%s", cur ? cur : "", cur ? "," : "", fork_tu_names[k]);
-                          setenv("TU_DEBUG", v, 1);
-                      }
-                      if (g_settings.fork_sync) setenv("LARECOMP_VK_ASYNC", "0", 1);
-                      LOG("[fork] Turnip debug: %s; rendering: %s\\n", k > 0 && k < 6 ? fork_tu_names[k] : "off",
-                          g_settings.fork_sync ? "synchronous" : "render thread");
+          edit("runtime/nvn/vulkan/exec.c",
+               "    if (!smaa && !fsr && !sgsr) return v;\n",
+               '''#ifdef __ANDROID__
+              bool soft = g_settings.fork_soft;  // (fork) Soft filter, in place of the upscaler
+              if (soft) fsr = sgsr = false;
+          #else
+              bool soft = false;
+          #endif
+              if (!smaa && !fsr && !sgsr && !soft) return v;
+          ''', "replace")
+
+          edit("runtime/nvn/vulkan/exec.c",
+               "        post_pass(cb, \"sgsr1.frag\", si, 1, e, ps, false);\n        v = post_view(e);\n    }\n",
+               '''    if (soft) {  // (fork) shaders.c fork_soft.frag, into an image the size of the picture in the window
+                  float iw = (float)b->width, ih = (float)b->height;
+                  TexBackend *e = post_image(3, ow, oh);
+                  float ps[8] = {1.0f / iw, 1.0f / ih, iw, ih, (float)ow, (float)oh};
+                  VkImageView si[3] = {v};
+                  post_pass(cb, "fork_soft.frag", si, 1, e, ps, false);
+                  v = post_view(e);
+              }
+              {
+                  static int fork_pso = -1;
+                  if ((int)soft != fork_pso) {
+                      fork_pso = soft;
+                      LOG("[fork] soft filter %s (%ux%u -> %ux%u)\\n", soft ? "on" : "off", b->width, b->height, ow, oh);
                   }
+              }
           ''')
 
           print("FORK: toutes les modifications sont appliquees")
