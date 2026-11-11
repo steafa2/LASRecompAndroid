@@ -32,7 +32,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Modifications du fork (resolution des ombres)
+      - name: Modifications du fork (build de diagnostic)
         if: ${{ inputs.modifications }}
         run: |
           python3 - <<'PYEOF'
@@ -49,134 +49,65 @@ jobs:
                   sys.exit("FORK: repere introuvable ou ambigu (%d fois au lieu de %d) dans %s :\n  %r" % (n, count, path, anchor))
               if where == "after":
                   out = src.replace(anchor, anchor + new)
-              elif where == "before":
-                  out = src.replace(anchor, new + anchor)
               else:
-                  out = src.replace(anchor, new)
+                  out = src.replace(anchor, new + anchor)
               open(path, "w", encoding="utf-8").write(out)
               print("FORK: %s modifie" % path)
 
-          # ---------------------------------------------------------------- 1. le reglage
+          # Build de diagnostic : deux reglages (onglet Video du menu en jeu), lus au demarrage de l'appli.
+          #   fork_tu   : une option de debogage du pilote Turnip (TU_DEBUG), ajoutee a celle du reglage LRZ
+          #   fork_sync : rendu sans le fil de rendu separe (LARECOMP_VK_ASYNC=0)
+
+          # ---------------------------------------------------------------- 1. les reglages
           edit("runtime/settings.h",
                "    bool shader_int32;",
-               "    int shadow_scale;     // (fork) the shadow map drawn at 1x / 2x / 4x its own size (vulkan/textures.c)\n",
+               "    int fork_tu;          // (fork) a Turnip debug option at the next start: vulkan/device.c fork_tu_names\n"
+               "    bool fork_sync;       // (fork) no render thread at the next start (LARECOMP_VK_ASYNC=0)\n",
                "before")
           edit("runtime/settings.c",
                '        else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;\n',
-               '        else if (!strcmp(key, "shadow_scale")) g_settings.shadow_scale = atoi(val);\n')
+               '        else if (!strcmp(key, "fork_tu")) g_settings.fork_tu = atoi(val);\n'
+               '        else if (!strcmp(key, "fork_sync")) g_settings.fork_sync = atoi(val) != 0;\n')
           edit("runtime/settings.c",
                '    fprintf(f, "shader_int32 = %d\\n", g_settings.shader_int32);\n',
-               '    fprintf(f, "shadow_scale = %d\\n", g_settings.shadow_scale);\n')
+               '    fprintf(f, "fork_tu = %d\\nfork_sync = %d\\n", g_settings.fork_tu, g_settings.fork_sync);\n')
 
           # ---------------------------------------------------------------- 2. le menu (onglet Video)
           edit("runtime/ui/menu.mm",
                '    opt_toggle("Frame generation", &g_settings.frame_gen, false,',
-               '''    {   // (fork)
-                  static const char *shq[] = {"Original", "2x", "4x"};
-                  int si = g_settings.shadow_scale >= 4 ? 2 : g_settings.shadow_scale >= 2 ? 1 : 0;
-                  if (opt_choice("Shadow resolution (fork)", &si, shq, 3, 0,
-                                 "Experimental. Draws the game's shadow map larger than the Switch's own size, so shadow edges "
-                                 "stop flickering while the camera moves, at any internal resolution. Costs some GPU time and "
-                                 "memory. Original: the game's own size."))
-                      g_settings.shadow_scale = si == 2 ? 4 : si == 1 ? 2 : 1;
+               '''    {   // (fork) diagnostics, read when the app starts: vulkan/device.c
+                  static const char *tu[] = {"Off", "sysmem", "gmem", "noubwc", "flushall", "nobin"};
+                  if (g_settings.fork_tu < 0 || g_settings.fork_tu > 5) g_settings.fork_tu = 0;
+                  opt_choice("Turnip debug (fork)", &g_settings.fork_tu, tu, 6, 0,
+                             "Diagnostic. Starts the Turnip driver with one of its debug options: sysmem / gmem force one of its "
+                             "two ways of drawing a pass, noubwc turns image compression off, flushall and nobin are slower, "
+                             "simpler paths. If shadows stop flickering with one of them, the driver is the cause. Takes effect "
+                             "at the next start of the app.");
+                  opt_toggle("Synchronous rendering (fork)", &g_settings.fork_sync, false,
+                             "Diagnostic. Translates the game's drawing on the game's own thread instead of a render thread one "
+                             "frame behind. Slower. If shadows stop flickering, the cause is timing between the two threads. "
+                             "Takes effect at the next start of the app.");
               }
           ''',
                "before")
 
-          # ---------------------------------------------------------------- 3. le moteur de rendu
-          edit("runtime/nvn/vulkan/vk.h",
-               "    bool scalable, presented;\n",
-               "    uint8_t shadow;  // (fork) textures.c vk_shadow_target: 0 new, 1 a shadow map drawn larger, 2 left alone, 3 seen\n")
-
-          edit("runtime/nvn/vulkan/textures.c",
-               '#include "vk.h"\n',
-               '#include "../../settings.h"  // (fork: shadow_scale)\n')
-
-          edit("runtime/nvn/vulkan/textures.c",
-               "// An image's share of the internal resolution: the game's own size, or (render targets) the internal resolution's.\n",
-               '''#ifdef __ANDROID__
-          // (fork) The shadow map: the game draws it at its own fixed size whatever the internal resolution, and its texels
-          // crawl over the ground as the camera moves. Shadow resolution (the Video tab) draws it 2x / 4x larger, up to 4096.
-          static float shadow_factor(const NvnTexture *t) {
-              int f = g_settings.shadow_scale;
-              if (f < 1) f = 1;
-              if (f > 4) f = 4;
-              uint32_t side = t->width > t->height ? t->width : t->height;
-              while (f > 1 && side * (uint32_t)f > 4096) f--;
-              return (float)f;
-          }
-          #endif
-          ''',
-               "before")
-
-          edit("runtime/nvn/vulkan/textures.c",
-               "static void tex_scale(const NvnTexture *t, const TexBackend *b, float *sx, float *sy) {\n",
-               '''#ifdef __ANDROID__
-              if (b->shadow == 1) { *sx = *sy = shadow_factor(t); return; }
-          #endif
+          # ---------------------------------------------------------------- 3. au demarrage, avant le chargement du pilote
+          edit("runtime/nvn/vulkan/device.c",
+               '        if (!lrz && !getenv("TU_DEBUG")) setenv("TU_DEBUG", "nolrz", 1);\n',
+               '''        {   // (fork) diagnostics from the Video tab
+                      static const char *const fork_tu_names[] = {"", "sysmem", "gmem", "noubwc", "flushall", "nobin"};
+                      int k = g_settings.fork_tu;
+                      if (k > 0 && k < 6) {
+                          char v[96];
+                          const char *cur = getenv("TU_DEBUG");
+                          snprintf(v, sizeof v, "%s%s%s", cur ? cur : "", cur ? "," : "", fork_tu_names[k]);
+                          setenv("TU_DEBUG", v, 1);
+                      }
+                      if (g_settings.fork_sync) setenv("LARECOMP_VK_ASYNC", "0", 1);
+                      LOG("[fork] Turnip debug: %s; rendering: %s\\n", k > 0 && k < 6 ? fork_tu_names[k] : "off",
+                          g_settings.fork_sync ? "synchronous" : "render thread");
+                  }
           ''')
-
-          edit("runtime/nvn/vulkan/textures.c",
-               "static void texture_snapshot_forget(TexBackend *b);\n",
-               '''#ifdef __ANDROID__
-          // (fork) exec.c, at each pass with a depth target: a square depth image drawn into with no color target is the shadow
-          // map - from then on it is a scaled target as the scene's are (its passes' viewports and the shaders that read it
-          // follow its scale, renderer_texture_scale), at shadow_factor. Anything else is left at its own size, and said once.
-          void vk_shadow_target(NvnTexture *t, int ncolor) {
-              if (!t || !renderer_format_is_depth(t->format)) return;
-              TexBackend *b = tex_backend(t);
-              if (b->shadow == 2 || (b->scalable && b->shadow != 1)) return;  // (left alone already / the scene's own depth)
-              bool square = t->width == t->height && t->width >= 256 && t->target == 1 && t->samples <= 1;
-              if (!square) {  // (never a shadow map: said once when it is drawn into alone)
-                  if (!ncolor) LOG("[shadow] depth-only target %ux%u (format %#x, target %u, samples %u): left at its own size\\n",
-                                   t->width, t->height, t->format, t->target, t->samples);
-                  b->shadow = 2;
-                  return;
-              }
-              if (ncolor) {  // (with a color target of another scale a larger depth image would not match it: back to its size)
-                  if (b->shadow == 1) {
-                      LOG("[shadow] shadow map %ux%u drawn into with %d color target(s): left at its own size from now on\\n",
-                          t->width, t->height, ncolor);
-                      b->shadow = 2;
-                      b->scalable = tex_scalable(t);
-                      destroy_image(b);
-                      create_image(t, b);
-                  }
-                  return;
-              }
-              if (b->shadow == 0) {
-                  b->shadow = 3;
-                  LOG("[shadow] shadow map %ux%u (format %#x)\\n", t->width, t->height, t->format);
-              }
-              if (b->shadow == 3 && g_settings.shadow_scale > 1) {
-                  b->shadow = 1;
-                  b->scalable = true;
-                  float wx, wy;
-                  tex_scale(t, b, &wx, &wy);
-                  LOG("[shadow] shadow map %ux%u drawn at %.0fx\\n", t->width, t->height, wx);
-                  if (b->sx != wx || b->sy != wy) { destroy_image(b); create_image(t, b); }
-              }
-          }
-          #endif
-
-          ''',
-               "before")
-
-          edit("runtime/nvn/vulkan/exec.c",
-               "void renderer_texture_scale(NvnTexture *t, float *sx, float *sy);\n",
-               "#ifdef __ANDROID__\nvoid vk_shadow_target(NvnTexture *t, int ncolor);  // (fork: textures.c)\n#endif\n")
-
-          edit("runtime/nvn/vulkan/exec.c",
-               "        renderer_mark_gpu_owned(st.rt.depth);\n",
-               '''#ifdef __ANDROID__
-                  {   // (fork) the shadow map, before its view is made: textures.c
-                      int nc = 0;
-                      for (int i = 0; i < st.rt.ncolor; i++) nc += st.rt.color[i] != NULL;
-                      vk_shadow_target(st.rt.depth, nc);
-                  }
-          #endif
-          ''',
-               "before")
 
           print("FORK: toutes les modifications sont appliquees")
           PYEOF
